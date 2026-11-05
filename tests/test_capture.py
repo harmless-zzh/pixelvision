@@ -37,6 +37,10 @@ class SlugTests(unittest.TestCase):
     def test_empty_url_falls_back(self):
         self.assertEqual(capture.slugify(""), "page")
 
+    def test_local_file_uses_basename(self):
+        self.assertEqual(capture.slugify("file:///D:/work/examples/demo.html"), "demo.html")
+        self.assertEqual(capture.slugify("file:///tmp/My%20Page.html"), "My_Page.html")
+
 
 @unittest.skipIf(Image is None, "pillow not installed")
 class TileTests(unittest.TestCase):
@@ -92,6 +96,12 @@ class CropParsingTests(unittest.TestCase):
 
     def test_percent(self):
         self.assertEqual(crop.parse_percent("0,0,100,50", (1000, 800)), (0, 0, 1000, 400))
+
+    def test_oversize_hint_only_above_bound(self):
+        self.assertIsNone(crop.oversize_hint((1280, 1568)))
+        hint = crop.oversize_hint((1680, 120))
+        self.assertIsNotNone(hint)
+        self.assertIn("1568", hint)
 
 
 class BrowserDiscoveryTests(unittest.TestCase):

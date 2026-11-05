@@ -49,6 +49,18 @@ def parse_percent(text: str, size: tuple[int, int]) -> tuple[int, int, int, int]
     )
 
 
+def oversize_hint(size: tuple[int, int]) -> str | None:
+    """Warn when a crop would be downscaled by a vision model anyway."""
+    long_edge = max(size)
+    if long_edge <= 1568:
+        return None
+    return (
+        f"output is {long_edge}px on the long edge; vision models downscale above 1568px, "
+        f"so the zoom may not buy you extra legibility. Use --mode downscale, a smaller "
+        f"--box, or a lower --zoom."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Crop and zoom a screenshot tile for closer visual reading.",
@@ -112,11 +124,16 @@ def main(argv: list[str] | None = None) -> int:
         "out": str(out),
         "out_size": [crop.width, crop.height],
     }
+    hint = oversize_hint(crop.size)
+    if hint:
+        info["hint"] = hint
     if args.json:
         import json
         print(json.dumps(info, ensure_ascii=False))
     else:
         print(f"{out}  {crop.width}x{crop.height}  (from {width}x{height} at {x1},{y1})")
+        if hint:
+            print(hint, file=sys.stderr)
     return 0
 
 

@@ -90,7 +90,7 @@ shots/
 
 | 宿主 | 做法 |
 |---|---|
-| **DeepSeek Harness** | `scripts/install.ps1`（或 `install.sh`）把仓库 junction 到 `~/.agents/skills/pixelvision` 与 `~/.dsh/skills/pixelvision`，重启会话后技能目录里就能看到 |
+| **DeepSeek Harness** | `scripts/install.ps1`（或 `install.sh`）把仓库 junction 到 `~/.agents/skills/pixelvision` 与 `~/.dsh/skills/pixelvision`，技能目录立刻可见（本仓库即在该环境下验证） |
 | **Claude Code** | 同一脚本会链接到 `~/.claude/skills/pixelvision`（若目录存在），或用 `--plugin-dir` 指向本仓库 |
 | **Codex / 其他** | 把 `SKILL.md` 作为指令文件加载，把仓库路径加进提示词；`AGENTS.md` 含仓库内约定 |
 
