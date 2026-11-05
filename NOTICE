@@ -1,0 +1,22 @@
+PixelVision
+Copyright 2026 PixelVision contributors
+
+This product includes software and ideas developed by the PixelRAG project
+(StarTrail-org/PixelRAG, https://github.com/StarTrail-org/PixelRAG),
+Copyright 2026 The Regents of the University of California / Berkeley SkyLab,
+licensed under the Apache License, Version 2.0.
+
+Specifically:
+
+- The screenshot-tiling approach, the 1568px tile-height convention for vision
+  models, and the `tiles.json` manifest shape follow PixelRAG's `pixelshot`
+  renderer and its published methodology ("PIXELRAG: Web Screenshots Beat Text
+  for RAG", arXiv:2606.28344).
+- The optional `--backend pixelshot` path executes the PixelRAG `pixelshot` CLI
+  as an external program; it does not vendor PixelRAG source code.
+- The prompt-injection guidance for screenshot content is adapted from PixelRAG's
+  `pixelbrowse` skill.
+
+No PixelRAG source file is copied into this repository. The renderer in
+`scripts/capture.py` is an independent Playwright implementation of the same
+idea.

@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PixelVision demo — Q3 operations dashboard</title>
+<style>
+  :root { --ink:#101828; --muted:#667085; --line:#eaecf0; --accent:#1f6feb; --ok:#12b76a; --warn:#f79009; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 "Segoe UI", system-ui, sans-serif; color:var(--ink); background:#f7f8fa; }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 32px 28px 48px; }
+  header { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:26px; }
+  h1 { font-size:24px; margin:0; letter-spacing:-.01em; }
+  .sub { color:var(--muted); font-size:13px; }
+  .kpis { display:grid; grid-template-columns: repeat(4, 1fr); gap:14px; margin-bottom:26px; }
+  .kpi { background:#fff; border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+  .kpi .label { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .kpi .value { font-size:27px; font-weight:650; margin:6px 0 2px; }
+  .kpi .delta { font-size:12.5px; }
+  .up { color:var(--ok); } .down { color:#d92d20; }
+  section { background:#fff; border:1px solid var(--line); border-radius:12px; padding:20px 22px; margin-bottom:22px; }
+  h2 { font-size:15px; margin:0 0 14px; font-weight:650; }
+  canvas { width:100%; height:230px; display:block; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  th { text-align:left; color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.05em; border-bottom:1px solid var(--line); padding:8px 10px; }
+  td { padding:9px 10px; border-bottom:1px solid var(--line); }
+  tr:last-child td { border-bottom:none; }
+  td.num { text-align:right; font-variant-numeric: tabular-nums; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:99px; font-size:11.5px; font-weight:600; }
+  .ok { background:#ecfdf3; color:#027a48; } .warn { background:#fffaeb; color:#b54708; } .bad { background:#fef3f2; color:#b42318; }
+  .note { color:var(--muted); font-size:12.5px; margin-top:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Q3 operations dashboard</h1>
+      <div class="sub">Region: APAC · Updated 2026-10-02 08:12 UTC · owner: ops-analytics</div>
+    </div>
+    <div class="sub">pixelvision demo page</div>
+  </header>
+
+  <div class="kpis">
+    <div class="kpi"><div class="label">Active pipelines</div><div class="value">1,284</div><div class="delta up">▲ 6.4% vs Q2</div></div>
+    <div class="kpi"><div class="label">p95 latency</div><div class="value">842 ms</div><div class="delta down">▼ 12.1% vs Q2</div></div>
+    <div class="kpi"><div class="label">Failed runs</div><div class="value">37</div><div class="delta down">▲ 9 today</div></div>
+    <div class="kpi"><div class="label">Cost / 1k runs</div><div class="value">$4.18</div><div class="delta up">▼ $0.31 vs Q2</div></div>
+  </div>
+
+  <section>
+    <h2>Throughput by week (runs/day)</h2>
+    <canvas id="chart" width="1880" height="460"></canvas>
+    <div class="note">Bars: completed runs. Line: 7-day rolling average. Week 37 shows the failover window.</div>
+  </section>
+
+  <section>
+    <h2>Service health</h2>
+    <table>
+      <thead><tr><th>Service</th><th>Region</th><th class="num">Runs</th><th class="num">p95</th><th class="num">Error %</th><th>Status</th></tr></thead>
+      <tbody>
+        <tr><td>ingest-api</td><td>ap-southeast-1</td><td class="num">512,904</td><td class="num">611 ms</td><td class="num">0.12%</td><td><span class="pill ok">healthy</span></td></tr>
+        <tr><td>render-worker</td><td>ap-southeast-1</td><td class="num">486,201</td><td class="num">1,932 ms</td><td class="num">1.84%</td><td><span class="pill warn">degraded</span></td></tr>
+        <tr><td>embed-batch</td><td>ap-northeast-1</td><td class="num">203,778</td><td class="num">4,510 ms</td><td class="num">0.94%</td><td><span class="pill ok">healthy</span></td></tr>
+        <tr><td>search-api</td><td>ap-southeast-1</td><td class="num">1,120,455</td><td class="num">118 ms</td><td class="num">0.03%</td><td><span class="pill ok">healthy</span></td></tr>
+        <tr><td>scheduler</td><td>ap-northeast-1</td><td class="num">88,102</td><td class="num">240 ms</td><td class="num">3.71%</td><td><span class="pill bad">incident</span></td></tr>
+      </tbody>
+    </table>
+    <div class="note">Error budget burn is 2.4× on scheduler; incident OPS-2291 is open.</div>
+  </section>
+</div>
+
+<script>
+const canvas = document.getElementById('chart');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const pad = { l: 90, r: 30, t: 20, b: 54 };
+const bars = [612, 648, 701, 688, 733, 760, 742, 781, 806, 790, 824, 861, 843, 812, 470, 512, 588];
+const avg  = [628, 640, 665, 672, 690, 712, 726, 741, 760, 774, 795, 812, 824, 828, 792, 742, 700];
+const labels = ['W23','W24','W25','W26','W27','W28','W29','W30','W31','W32','W33','W34','W35','W36','W37','W38','W39'];
+const max = 1000;
+const innerW = W - pad.l - pad.r, innerH = H - pad.t - pad.b;
+
+ctx.font = '26px "Segoe UI", sans-serif';
+ctx.strokeStyle = '#eaecf0'; ctx.fillStyle = '#667085'; ctx.lineWidth = 2;
+for (let v = 0; v <= max; v += 250) {
+  const y = pad.t + innerH - (v / max) * innerH;
+  ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+  ctx.textAlign = 'right'; ctx.fillText(String(v), pad.l - 16, y + 9);
+}
+
+const bw = innerW / bars.length;
+bars.forEach((v, i) => {
+  const x = pad.l + i * bw + bw * 0.18;
+  const h = (v / max) * innerH;
+  ctx.fillStyle = i === 14 ? '#f79009' : '#c7d7fe';
+  ctx.fillRect(x, pad.t + innerH - h, bw * 0.64, h);
+  ctx.fillStyle = '#667085'; ctx.textAlign = 'center'; ctx.font = '24px "Segoe UI", sans-serif';
+  ctx.fillText(labels[i], x + bw * 0.32, H - 18);
+});
+
+ctx.beginPath(); ctx.strokeStyle = '#1f6feb'; ctx.lineWidth = 5;
+avg.forEach((v, i) => {
+  const x = pad.l + i * bw + bw * 0.5;
+  const y = pad.t + innerH - (v / max) * innerH;
+  i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+});
+ctx.stroke();
+</script>
+</body>
+</html>

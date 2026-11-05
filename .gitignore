@@ -1,0 +1,21 @@
+# virtualenvs
+.venv/
+.venv-test/
+venv/
+
+# capture output
+shots/
+out/
+tiles/
+*.png.tiles/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
