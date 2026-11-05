@@ -23,6 +23,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from _console import force_utf8_stdio
+
 
 def parse_box(text: str) -> tuple[int, int, int, int]:
     parts = [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
@@ -46,6 +48,20 @@ def parse_percent(text: str, size: tuple[int, int]) -> tuple[int, int, int, int]
         int(height * top / 100),
         int(width * right / 100),
         int(height * bottom / 100),
+    )
+
+
+def output_format(path: Path) -> str:
+    """Pick the encoder from the output suffix instead of always writing PNG."""
+    suffix = path.suffix.lower()
+    if suffix in ("", ".png"):
+        return "PNG"
+    if suffix in (".jpg", ".jpeg"):
+        return "JPEG"
+    if suffix == ".webp":
+        return "WEBP"
+    raise SystemExit(
+        f"unsupported output extension {suffix!r}; use .png, .jpg/.jpeg, or .webp"
     )
 
 
@@ -77,6 +93,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--out", help="output path (default: <image>_crop.png)")
     parser.add_argument("--json", action="store_true", help="print the result as JSON")
     args = parser.parse_args(argv)
+    force_utf8_stdio()
+
+    if args.zoom < 0:
+        raise SystemExit("--zoom must be >= 0 (0 means no zoom)")
 
     try:
         from PIL import Image
@@ -86,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     src = Path(args.image).expanduser().resolve()
     if not src.is_file():
         raise SystemExit(f"no such image: {src}")
+
+    # Validate the output suffix before spending time on the crop itself.
+    out = Path(args.out).expanduser() if args.out else src.with_name(src.stem + "_crop.png")
+    fmt = output_format(out)
 
     with Image.open(src) as img:
         img = img.convert("RGB")
@@ -113,9 +137,13 @@ def main(argv: list[str] | None = None) -> int:
             ratio = 1568 / max(crop.size)
             crop = crop.resize((max(1, int(crop.width * ratio)), max(1, int(crop.height * ratio))), Image.LANCZOS)
 
-        out = Path(args.out).expanduser() if args.out else src.with_name(src.stem + "_crop.png")
         out.parent.mkdir(parents=True, exist_ok=True)
-        crop.save(out, "PNG", optimize=True)
+        if fmt == "JPEG":
+            crop.save(out, "JPEG", quality=92, optimize=True)
+        elif fmt == "WEBP":
+            crop.save(out, "WEBP", quality=92, method=6)
+        else:
+            crop.save(out, "PNG", optimize=True)
 
     info = {
         "source": str(src),
@@ -123,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         "box": [x1, y1, x2, y2],
         "out": str(out),
         "out_size": [crop.width, crop.height],
+        "format": fmt,
     }
     hint = oversize_hint(crop.size)
     if hint:

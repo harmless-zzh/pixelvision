@@ -50,10 +50,10 @@ $doctorExit = $LASTEXITCODE
 
 if ($doctorExit -ne 0) {
     Write-Host ""
-    Write-Host "No usable browser found. Two options:" -ForegroundColor Yellow
-    Write-Host "  1. install Google Chrome or Microsoft Edge (recommended), or"
-    Write-Host "  2. let Playwright fetch its own Chromium:"
-    Write-Host "     & `"$VenvPy`" -m playwright install chromium"
+    Write-Host "Doctor reported at least one FAIL (see the FAIL lines above). Fix those, then rerun." -ForegroundColor Yellow
+    Write-Host "If the failure is that no browser is available, either install Google Chrome or"
+    Write-Host "Microsoft Edge (recommended), or let Playwright fetch its own Chromium:"
+    Write-Host "  & `"$VenvPy`" -m playwright install chromium"
 }
 
 Write-Host ""

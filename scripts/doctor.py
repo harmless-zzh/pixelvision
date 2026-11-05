@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Check whether this machine can actually render pages and read them back.
 
-Run this first when a capture fails, or before installing. It answers one
-question per line and exits non-zero only when a hard requirement is missing.
+Run this first when a capture fails, or before installing. Each line is one of:
+ok (works), warn (may still work, usually offline or optional), FAIL (capture
+cannot work until this is fixed). The process exits non-zero only on FAIL.
 
     python scripts/doctor.py
     python scripts/doctor.py --json
@@ -11,38 +12,57 @@ question per line and exits non-zero only when a hard requirement is missing.
 from __future__ import annotations
 
 import json
-import os
 import platform
 import shutil
-import subprocess
 import sys
+from functools import lru_cache
 from pathlib import Path
+
+from _console import force_utf8_stdio
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _result(name: str, level: str, detail: str, hint: str = "") -> dict:
+    return {"name": name, "level": level, "ok": level != "fail", "detail": detail, "hint": hint}
+
+
 def check_python() -> dict:
     ok = sys.version_info >= (3, 10)
-    return {
-        "name": "python",
-        "ok": ok,
-        "detail": platform.python_version() + ("" if ok else " (need >= 3.10)"),
-        "hint": "" if ok else "install Python 3.10 or newer",
-    }
+    return _result(
+        "python",
+        "ok" if ok else "fail",
+        platform.python_version() + ("" if ok else " (need >= 3.10)"),
+        "" if ok else "install Python 3.10 or newer",
+    )
 
 
 def check_pillow() -> dict:
     try:
         from importlib.metadata import version
 
-        return {"name": "pillow", "ok": True, "detail": version("pillow"), "hint": ""}
+        return _result("pillow", "ok", version("pillow"))
     except Exception:  # noqa: BLE001
-        return {
-            "name": "pillow",
-            "ok": False,
-            "detail": "not installed",
-            "hint": f"{sys.executable} -m pip install pillow",
-        }
+        return _result(
+            "pillow",
+            "fail",
+            "not installed",
+            f"{sys.executable} -m pip install pillow",
+        )
+
+
+@lru_cache(maxsize=1)
+def _bundled_chromium() -> str | None:
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            exe = p.chromium.executable_path
+            if exe and Path(exe).is_file():
+                return str(exe)
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def check_playwright() -> dict:
@@ -51,22 +71,31 @@ def check_playwright() -> dict:
 
         dist_version = version("playwright")
     except Exception:  # noqa: BLE001
-        return {
-            "name": "playwright",
-            "ok": False,
-            "detail": "not installed",
-            "hint": f"{sys.executable} -m pip install playwright",
-        }
-    try:
-        from playwright.sync_api import sync_playwright
+        return _result(
+            "playwright",
+            "fail",
+            "not installed",
+            f"{sys.executable} -m pip install playwright",
+        )
 
-        with sync_playwright() as p:
-            exe = p.chromium.executable_path
-            bundled = bool(exe and Path(exe).is_file())
-        detail = f"{dist_version}, bundled chromium {'present' if bundled else 'absent'}"
-        return {"name": "playwright", "ok": True, "detail": detail, "hint": ""}
-    except Exception as exc:  # noqa: BLE001
-        return {"name": "playwright", "ok": True, "detail": f"{dist_version} ({exc})", "hint": ""}
+    exe = _bundled_chromium()
+    if exe:
+        return _result("playwright", "ok", f"{dist_version}, bundled chromium present")
+    try:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from capture import find_browser  # type: ignore
+
+        channel, path = find_browser()
+    except Exception:  # noqa: BLE001
+        channel, path = None, None
+    if path:
+        return _result("playwright", "ok", f"{dist_version}, using system browser ({channel})")
+    return _result(
+        "playwright",
+        "warn",
+        f"{dist_version}, no browser available yet",
+        "install Chrome/Edge or run `playwright install chromium`",
+    )
 
 
 def check_browser() -> dict:
@@ -74,18 +103,21 @@ def check_browser() -> dict:
     try:
         from capture import find_browser  # type: ignore
     except Exception as exc:  # noqa: BLE001
-        return {"name": "browser", "ok": False, "detail": f"cannot import capture.py: {exc}",
-                "hint": "run this from the repo checkout"}
+        return _result("browser", "fail", f"cannot import capture.py: {exc}",
+                       "run this from the repo checkout")
 
     channel, path = find_browser()
     if path:
-        return {"name": "browser", "ok": True, "detail": f"{channel}: {path}", "hint": ""}
-    return {
-        "name": "browser",
-        "ok": False,
-        "detail": "no Chrome/Edge/Chromium executable found",
-        "hint": "install Chrome or Edge, run `playwright install chromium`, or set CHROME_PATH",
-    }
+        return _result("browser", "ok", f"{channel}: {path}")
+    bundled = _bundled_chromium()
+    if bundled:
+        return _result("browser", "ok", f"playwright bundled chromium: {bundled}")
+    return _result(
+        "browser",
+        "fail",
+        "no system Chrome/Edge/Chromium and no bundled chromium",
+        "install Chrome or Edge, run `playwright install chromium`, or set CHROME_PATH",
+    )
 
 
 def check_pixelshot() -> dict:
@@ -98,13 +130,13 @@ def check_pixelshot() -> dict:
     if not exe and find_pixelshot:
         exe = find_pixelshot()
     if exe:
-        return {"name": "pixelshot (optional)", "ok": True, "detail": exe, "hint": ""}
-    return {
-        "name": "pixelshot (optional)",
-        "ok": True,
-        "detail": "not installed",
-        "hint": "optional: `uv tool install pixelrag` for the PixelRAG backend",
-    }
+        return _result("pixelshot (optional)", "ok", exe)
+    return _result(
+        "pixelshot (optional)",
+        "ok",
+        "not installed",
+        "optional: `uv tool install pixelrag` for the PixelRAG backend",
+    )
 
 
 def check_network() -> dict:
@@ -114,15 +146,15 @@ def check_network() -> dict:
     for host, port in targets:
         try:
             with socket.create_connection((host, port), timeout=5):
-                return {"name": "network", "ok": True, "detail": f"{host}:{port} reachable", "hint": ""}
+                return _result("network", "ok", f"{host}:{port} reachable")
         except Exception:  # noqa: BLE001
             continue
-    return {
-        "name": "network",
-        "ok": False,
-        "detail": "no test host reachable",
-        "hint": "check proxy / offline; local file:// captures still work",
-    }
+    return _result(
+        "network",
+        "warn",
+        "no test host reachable",
+        "offline is fine for file:// captures; remote URLs will fail",
+    )
 
 
 def check_skill_install() -> dict:
@@ -130,13 +162,13 @@ def check_skill_install() -> dict:
     candidates = [home / ".agents" / "skills" / "pixelvision", home / ".dsh" / "skills" / "pixelvision"]
     found = [str(p) for p in candidates if (p / "SKILL.md").is_file()]
     if found:
-        return {"name": "skill installed", "ok": True, "detail": ", ".join(found), "hint": ""}
-    return {
-        "name": "skill installed",
-        "ok": True,
-        "detail": "not installed globally (the repo still works in place)",
-        "hint": "run scripts/install.ps1 or scripts/install.sh to expose it to your agents",
-    }
+        return _result("skill installed", "ok", ", ".join(found))
+    return _result(
+        "skill installed",
+        "ok",
+        "not installed globally (the repo still works in place)",
+        "run scripts/install.ps1 or scripts/install.sh to expose it to your agents",
+    )
 
 
 CHECKS = [check_python, check_pillow, check_playwright, check_browser, check_pixelshot,
@@ -144,21 +176,25 @@ CHECKS = [check_python, check_pillow, check_playwright, check_browser, check_pix
 
 
 def main() -> int:
+    force_utf8_stdio()
     results = [check() for check in CHECKS]
-    hard_failures = [r for r in results if not r["ok"]]
+    hard_failures = [r for r in results if r["level"] == "fail"]
+    warnings = [r for r in results if r["level"] == "warn"]
 
     if "--json" in sys.argv:
-        print(json.dumps({"ok": not hard_failures, "checks": results}, ensure_ascii=False, indent=2))
+        print(json.dumps({"ok": not hard_failures, "checks": results}, ensure_ascii=True, indent=2))
     else:
         print(f"pixelvision doctor  ({platform.system()} {platform.release()})\n")
+        marks = {"ok": "ok  ", "warn": "warn", "fail": "FAIL"}
         for r in results:
-            mark = "ok  " if r["ok"] else "FAIL"
-            print(f"  [{mark}] {r['name']:<22} {r['detail']}")
+            print(f"  [{marks[r['level']]}] {r['name']:<22} {r['detail']}")
             if r["hint"]:
-                print(f"         -> {r['hint']}")
+                print(f"           -> {r['hint']}")
         print()
         if hard_failures:
             print(f"{len(hard_failures)} check(s) failed. Fix the FAIL lines above, then retry.")
+        elif warnings:
+            print(f"{len(warnings)} warning(s). Captures may still work; see the warn lines above.")
         else:
             print("Ready. Try: python scripts/capture.py https://example.com -o ./shots")
     return 1 if hard_failures else 0

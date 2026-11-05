@@ -21,7 +21,8 @@ set -e
 
 if [ "$status" -ne 0 ]; then
   echo
-  echo "No usable browser found. Either install Chrome/Edge, or let Playwright fetch Chromium:"
+  echo "Doctor reported at least one FAIL (see the FAIL lines above). Fix those, then rerun."
+  echo "If no browser is available, install Chrome/Edge, or let Playwright fetch Chromium:"
   echo "  \"$VENV/bin/python\" -m playwright install chromium"
 fi
 

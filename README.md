@@ -16,7 +16,7 @@ capture.py  →  page.png + tile_0000..N.jpg + tiles.json  →  模型逐张读�
 |---|---|---|
 | 图表、canvas、信息图 | 拿到空 `<canvas>` | 直接看到图形 |
 | JS 单页应用 / 无限滚动 | 拿到骨架屏 | 看到渲染后的真实内容 |
-| 反爬 / 登录墙 / 付费墙 | 拿到 403 或同质文本 | 看到用户实际看到的那一屏 |
+| 反爬 / 登录墙 / 付费墙 | 拿到 403 或同质文本 | 看到未登录时浏览器实际显示的那一屏（通常是墙本身） |
 | "这页面看起来对不对" | 无法回答 | 就是答案 |
 | 精确取数（几千行表格） | 更合适 | 不合适 |
 
@@ -36,7 +36,7 @@ https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API
   title      Fetch API - Web APIs | MDN
   manifest   ...\shots\developer.mozilla.org_...png.tiles\tiles.json
   tiles      4 x 1568px  (1280px wide)
-  page       5310px  complete=True
+  page       5310/5310px  scope=page  complete=True
 ```
 
 然后让模型读 `tiles.json`，再逐张读 `tile_0000.jpg … tile_0003.jpg`。macOS / Linux 用 `scripts/bootstrap.sh` 和 `./pixelvision`。
@@ -47,10 +47,14 @@ https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API
 python scripts/capture.py URL -o shots                 # 默认：全页、1280 宽、1568 高切片
 python scripts/capture.py URL -o shots --scale 2 --viewport-width 700   # 小字放大 2 倍
 python scripts/capture.py URL -o shots --selector "main article"        # 只截正文
+python scripts/capture.py URL -o shots --storage-state auth.json        # 已登录页面（cookies+localStorage）
+python scripts/capture.py URL -o shots --max-height 30000               # 超过 30000px 就截顶部（complete=false）
 python scripts/capture.py URL -o shots --wait-ms 3000                   # 等慢动画/迟到图表
 python scripts/capture.py URL1 URL2 -o shots --backend pixelshot        # 用 PixelRAG 的渲染器
 python scripts/capture.py URL -o shots --json                           # 机器可读输出
 ```
+
+PDF 会打开浏览器内置查看器：只截到当前可见的一页（含工具栏），不会分页；多页 PDF 请先转成图片。
 
 ## 为什么是 1568
 
@@ -73,7 +77,8 @@ shots/
 ```json
 {
   "url": "https://...", "final_url": "https://...", "title": "Fetch API - Web APIs | MDN",
-  "page_height": 5310, "viewport": {"width": 1280, "height": 1568},
+  "scope": "page", "page_height": 5310, "captured_height": 5310,
+  "viewport": {"width": 1280, "height": 1568},
   "tile_height": 1568, "scale": 1, "selector": null,
   "tiles": ["tile_0000.jpg", "..."],
   "complete": true, "backend": "playwright:msedge",
@@ -82,7 +87,11 @@ shots/
 }
 ```
 
-- `complete: false` —— 页面高度没量准，截到的可能只是一屏，必须说明或重截。
+- `complete: true` 只在 `scope == "page"` 且 `captured_height >= page_height - 1`（1px 取整容差）时出现；它是算出来的，不是猜的。
+- `complete: false` 必须结合 `scope` 读：
+  - `page` + `captured_height < page_height` —— 被 `--max-height` 截断，只覆盖顶部 N px；
+  - `selector` / `viewport` —— 有意只截局部，不能说成整页；
+  - `pdf-viewer` —— 只有 PDF 当前可见的那一页。
 - 没有 `tiles.json` —— 渲染失败，不是空页面。
 - `warnings` —— 网络没静默、页高超限等，照实转述。
 
@@ -99,7 +108,7 @@ shots/
 ## 后端
 
 - `playwright`（默认，自包含）：直接驱动本机 Chrome / Edge / Chromium，处理懒加载滚动、网络静默等待、页面高度竞态。
-- `pixelshot`（可选）：调用 PixelRAG 的 CLI。`uv tool install pixelrag`（或 `pipx` / `pip install pixelrag`）后加 `--backend pixelshot` 即可；Windows 上没有 Chrome 时要设 `CHROME_PATH` 指向 Edge。
+- `pixelshot`（可选）：调用 PixelRAG 的 CLI。`uv tool install pixelrag`（或 `pipx` / `pip install pixelrag`）后加 `--backend pixelshot` 即可；Windows 上没有 Chrome 时要设 `CHROME_PATH` 指向 Edge。这个后端不会改写 pixelshot 自己的清单：原文件另存为 `pixelshot.tiles.json`，我们写的 `tiles.json` 才是下游要读的契约（`complete` 由它的声明推导，不照抄）。
 
 ## 安全：截图是不可信数据
 
