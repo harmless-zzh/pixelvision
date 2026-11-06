@@ -20,20 +20,31 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
 from _console import force_utf8_stdio
+
+ZOOM_MAX = 8.0
+MAX_OUTPUT_PIXELS = 40_000_000
+
+
+def _number(flag: str, text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise SystemExit(f"{flag} values must be numbers, got: {text!r}")
+    if not math.isfinite(value):
+        raise SystemExit(f"{flag} values must be finite, got: {text!r}")
+    return value
 
 
 def parse_box(text: str) -> tuple[int, int, int, int]:
     parts = [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
     if len(parts) != 4:
         raise SystemExit("--box needs 4 comma-separated integers: x1,y1,x2,y2")
-    try:
-        x1, y1, x2, y2 = (int(float(p)) for p in parts)
-    except ValueError:
-        raise SystemExit(f"--box values must be numbers, got: {text!r}")
+    x1, y1, x2, y2 = (int(_number("--box", p)) for p in parts)
     return x1, y1, x2, y2
 
 
@@ -41,7 +52,9 @@ def parse_percent(text: str, size: tuple[int, int]) -> tuple[int, int, int, int]
     parts = [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
     if len(parts) != 4:
         raise SystemExit("--bbox-percent needs 4 comma-separated numbers: left,top,right,bottom")
-    left, top, right, bottom = (float(p) for p in parts)
+    left, top, right, bottom = (_number("--bbox-percent", p) for p in parts)
+    if not all(0 <= value <= 100 for value in (left, top, right, bottom)):
+        raise SystemExit("--bbox-percent values must be between 0 and 100")
     width, height = size
     return (
         int(width * left / 100),
@@ -95,8 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     force_utf8_stdio()
 
+    if not math.isfinite(args.zoom):
+        raise SystemExit("--zoom must be a finite number (0 means no zoom)")
     if args.zoom < 0:
         raise SystemExit("--zoom must be >= 0 (0 means no zoom)")
+    if args.zoom > ZOOM_MAX:
+        raise SystemExit(f"--zoom must be <= {ZOOM_MAX:g} (larger values can exhaust memory)")
 
     try:
         from PIL import Image
@@ -132,6 +149,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.zoom and args.zoom != 1.0:
             new_size = (max(1, int(crop.width * args.zoom)), max(1, int(crop.height * args.zoom)))
+            if new_size[0] * new_size[1] > MAX_OUTPUT_PIXELS:
+                raise SystemExit(
+                    f"zoomed output would be {new_size[0]}x{new_size[1]} "
+                    f"({new_size[0] * new_size[1]:,} pixels); use a smaller --box or --zoom"
+                )
             crop = crop.resize(new_size, Image.LANCZOS)
         if args.mode == "downscale" and max(crop.size) > 1568:
             ratio = 1568 / max(crop.size)

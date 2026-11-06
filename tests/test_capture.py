@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -138,11 +139,110 @@ class TileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             capture.tile_image(page, page.parent / "tiles", tile_height=1569)
 
+    def test_image_wider_than_the_bound_is_rejected_unless_explicit(self):
+        page = self._tall_image(2000, 100)
+        with self.assertRaises(ValueError):
+            capture.tile_image(page, page.parent / "wide-rejected")
+        names = capture.tile_image(page, page.parent / "wide-allowed", allow_wide=True)
+        self.assertEqual(names, ["tile_0000.jpg"])
+
+    def test_tile_dir_is_not_reused_for_a_different_url_with_the_same_slug(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = capture._tile_dir_for(root, "https://example.com/a/b")
+            first.mkdir()
+            capture.write_manifest(first, {"url": "https://example.com/a/b", "complete": True})
+            same = capture._tile_dir_for(root, "https://example.com/a/b")
+            other = capture._tile_dir_for(root, "https://example.com/a_b")
+            self.assertEqual(same, first)
+            self.assertNotEqual(other, first)
+            self.assertRegex(other.name, r"-[0-9a-f]{8}\.png\.tiles$")
+
+    def test_url_key_ignores_percent_encoding_in_the_path(self):
+        self.assertEqual(
+            capture._url_key("https://example.com/a%20b"),
+            capture._url_key("https://example.com/a b"),
+        )
+
+    def test_tile_dir_does_not_put_credentials_in_the_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = capture._tile_dir_for(Path(tmp), "http://user:secret@example.com/x")
+            self.assertNotIn("secret", str(path))
+            self.assertIn("example.com", str(path))
+
     def test_manifest_roundtrip_is_json(self):
         payload = {"tiles": ["tile_0000.jpg"], "complete": True}
         path = Path(tempfile.mkdtemp()) / "tiles.json"
         path.write_text(json.dumps(payload), encoding="utf-8")
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["tiles"], ["tile_0000.jpg"])
+
+    def test_query_tokens_are_redacted_from_urls_and_text(self):
+        self.assertEqual(
+            capture.redact_url("https://example.com/a?token=SECRET&x=1&api_key=K"),
+            "https://example.com/a?token=***&x=1&api_key=***",
+        )
+        text = capture._clean_text("failed https://example.com/a?token=SECRET&x=1")
+        self.assertIn("token=***", text)
+        self.assertNotIn("SECRET", text)
+
+
+class WrapTests(unittest.TestCase):
+    def _page_with_repeated_top(self, height=3000, band=512):
+        tmp = Path(tempfile.mkdtemp())
+        path = tmp / "page.png"
+        img = Image.new("RGB", (1280, height), "white")
+        top = Image.new("RGB", (1280, band), "white")
+        for x in range(0, 1280, 40):
+            top.paste((20, 40, 60), (x, 10, x + 20, band - 10))
+        img.paste(top, (0, 0))
+        img.paste(top, (0, height - band))
+        img.save(path)
+        return path
+
+    def test_exact_featured_top_and_bottom_bands_look_wrapped(self):
+        self.assertTrue(capture._wrapped_bottom(self._page_with_repeated_top()))
+
+    def test_blank_page_is_not_called_wrapped(self):
+        path = Path(tempfile.mkdtemp()) / "blank.png"
+        Image.new("RGB", (1280, 3000), "white").save(path)
+        self.assertFalse(capture._wrapped_bottom(path))
+
+
+class CaptureRegionTests(unittest.TestCase):
+    class _Page:
+        def __init__(self, scale=1):
+            self.scale = scale
+            self.calls = []
+
+        def screenshot(self, *, path, full_page, clip, timeout):
+            self.calls.append((full_page, dict(clip)))
+            width = int(clip["width"] * self.scale)
+            height = int(clip["height"] * self.scale)
+            # Encode the clip's y in the first pixel so a bad stitch is visible.
+            color = (int(clip["y"]) % 256, 0, 0)
+            Image.new("RGB", (width, height), color).save(path)
+
+    def test_segments_are_stitched_and_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._Page()
+            out = Path(tmp) / "page.png"
+            capture._capture_region(
+                page, out, x=0, y=0, width=100, height=20000, scale=1, timeout_ms=1000
+            )
+            self.assertEqual(capture._image_size(out), (100, 20000))
+            self.assertEqual(len(page.calls), 3)
+            self.assertTrue(all(call[0] for call in page.calls))
+            self.assertEqual(list(Path(tmp).glob("*.seg*.png")), [])
+
+    def test_scale_two_stitches_device_pixels(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self._Page(scale=2)
+            out = Path(tmp) / "page.png"
+            capture._capture_region(
+                page, out, x=0, y=0, width=100, height=9000, scale=2, timeout_ms=1000
+            )
+            self.assertEqual(capture._image_size(out), (200, 18000))
+            self.assertGreaterEqual(len(page.calls), 3)
 
 
 class ManifestTests(unittest.TestCase):
@@ -176,7 +276,27 @@ class ManifestTests(unittest.TestCase):
     def test_capped_page_is_incomplete_and_warns(self):
         manifest = self._manifest(captured_height=500)
         self.assertFalse(manifest["complete"])
-        self.assertTrue(any("captured 500px" in w for w in manifest["warnings"]))
+        self.assertTrue(any("captured the top 500px" in w for w in manifest["warnings"]))
+
+    def test_horizontal_truncation_is_incomplete_and_warns(self):
+        manifest = self._manifest(width_truncated=True)
+        self.assertFalse(manifest["complete"])
+        self.assertTrue(any("horizontal overflow" in w for w in manifest["warnings"]))
+
+    def test_zero_captured_height_is_incomplete(self):
+        self.assertFalse(self._manifest(page_height=1, captured_height=0)["complete"])
+
+    def test_manifest_redacts_credentials_and_sanitises_title(self):
+        manifest = self._manifest(
+            url="https://user:secret@example.com/x",
+            final_url="https://user:secret@example.com/x",
+            title="A\x1bB\nC",
+        )
+        self.assertEqual(manifest["url"], "https://***@example.com/x")
+        self.assertNotIn("secret", json.dumps(manifest))
+        self.assertEqual(manifest["title"], "A B C")
+        # A lone surrogate must not make write_manifest raise.
+        capture._clean_text("A\ud800B")
 
     def test_selector_is_never_complete(self):
         manifest = self._manifest(scope="selector", selector="#box", captured_height=220, page_height=3820)
@@ -193,6 +313,18 @@ class ManifestTests(unittest.TestCase):
 
     def test_unknown_page_height_is_incomplete(self):
         self.assertFalse(self._manifest(page_height=0, captured_height=0)["complete"])
+
+    def test_wrap_suspicion_is_incomplete_and_warns(self):
+        manifest = self._manifest(wrap_suspected=True)
+        self.assertFalse(manifest["complete"])
+        self.assertTrue(manifest["wrap_suspected"])
+        self.assertTrue(any("bottom band repeats" in w for w in manifest["warnings"]))
+
+    def test_lazy_scroll_cap_is_incomplete_and_warns(self):
+        manifest = self._manifest(page_height=50000, captured_height=50000, lazy_truncated=True)
+        self.assertFalse(manifest["complete"])
+        self.assertTrue(manifest["lazy_truncated"])
+        self.assertTrue(any("lazy-load pre-scroll limit" in w for w in manifest["warnings"]))
 
     def test_one_pixel_rounding_is_still_complete(self):
         self.assertTrue(self._manifest(captured_height=999)["complete"])
@@ -215,6 +347,9 @@ class ParserTests(unittest.TestCase):
         args = self._parse()
         self.assertEqual(args.tile_height, capture.VISION_MAX_EDGE)
         self.assertEqual(args.viewport_width, capture.DEFAULT_VIEWPORT_WIDTH)
+        self.assertEqual(args.viewport_height, capture.DEFAULT_VIEWPORT_HEIGHT)
+        self.assertEqual(args.selector_timeout, capture.DEFAULT_SELECTOR_TIMEOUT_MS)
+        self.assertFalse(args.allow_partial)
         self.assertEqual(args.backend, "auto")
 
     def test_out_of_range_values_are_rejected(self):
@@ -225,6 +360,8 @@ class ParserTests(unittest.TestCase):
             ("--max-height", "-1"),
             ("--scale", "5"),
             ("--quality", "101"),
+            ("--viewport-height", "100"),
+            ("--selector-timeout", "99"),
         ]
         for flag, value in cases:
             with self.subTest(flag=flag, value=value):
@@ -233,6 +370,16 @@ class ParserTests(unittest.TestCase):
 
     def test_zero_max_height_means_no_cap(self):
         self.assertEqual(self._parse("--max-height", "0").max_height, 0)
+
+    def test_profile_defaults_to_none_and_show_is_off(self):
+        args = self._parse()
+        self.assertIsNone(args.profile)
+        self.assertFalse(args.show)
+
+    def test_profile_and_show_are_accepted_together(self):
+        args = self._parse("--profile", "prof", "--show")
+        self.assertEqual(args.profile, "prof")
+        self.assertTrue(args.show)
 
 
 class CropParsingTests(unittest.TestCase):
@@ -243,6 +390,16 @@ class CropParsingTests(unittest.TestCase):
     def test_box_rejects_bad_input(self):
         with self.assertRaises(SystemExit):
             crop.parse_box("1,2,3")
+        for bad in ("nan,0,10,10", "inf,0,10,10", "1,2,3,x"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    crop.parse_box(bad)
+
+    def test_percent_rejects_non_finite_and_out_of_range(self):
+        for bad in ("nan,0,100,100", "0,0,101,100", "-1,0,100,100"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    crop.parse_percent(bad, (100, 100))
 
     def test_percent(self):
         self.assertEqual(crop.parse_percent("0,0,100,50", (1000, 800)), (0, 0, 1000, 400))
@@ -261,6 +418,15 @@ class CropParsingTests(unittest.TestCase):
         self.assertEqual(crop.output_format(Path("x.webp")), "WEBP")
         with self.assertRaises(SystemExit):
             crop.output_format(Path("x.gif"))
+
+    def test_zoom_rejects_non_finite_and_excessive_zoom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src.png"
+            src.write_bytes(b"not decoded before validation")
+            for zoom in ("nan", "inf", "9"):
+                with self.subTest(zoom=zoom):
+                    with self.assertRaises(SystemExit):
+                        crop.main([str(src), "--zoom", zoom])
 
     @unittest.skipIf(Image is None, "pillow not installed")
     def test_jpeg_suffix_writes_jpeg_bytes(self):
@@ -293,6 +459,26 @@ class CliTests(unittest.TestCase):
             self.assertIn("no_such_page.html", message)
             self.assertIn("also_missing.html", message)
 
+    def test_show_without_profile_is_rejected_before_launching(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            err = io.StringIO()
+            with mock.patch.object(capture, "render_with_playwright") as render:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    code = capture.main(["https://example.com", "-o", tmp, "--show"])
+            self.assertEqual(code, 2)
+            self.assertIn("--profile", err.getvalue())
+            render.assert_not_called()
+
+    def test_missing_dependency_exits_two_with_actionable_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            err = io.StringIO()
+            deeper = SystemExit("playwright is not installed.\n  python -m pip install playwright")
+            with mock.patch.object(capture, "render_with_playwright", side_effect=deeper):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    code = capture.main(["https://example.com", "-o", tmp])
+            self.assertEqual(code, 2)
+            self.assertIn("playwright is not installed", err.getvalue())
+
     def test_json_failure_payload_is_still_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = io.StringIO()
@@ -304,7 +490,7 @@ class CliTests(unittest.TestCase):
             # A caller that iterates results must see the same keys a success carries.
             self.assertIs(payload["complete"], False)
 
-    def test_json_mixed_batch_exits_zero_and_lists_both(self):
+    def test_json_all_failed_batch_lists_both_and_exits_nonzero(self):
         with tempfile.TemporaryDirectory() as tmp:
             # Two missing files: no browser is launched, so the batch stays offline.
             out = io.StringIO()
@@ -314,6 +500,75 @@ class CliTests(unittest.TestCase):
             results = json.loads(out.getvalue())["results"]
             self.assertEqual([r["complete"] for r in results], [False, False])
             self.assertEqual([r["url"] for r in results], ["missing_a.html", "missing_b.html"])
+
+    def _fake_success(self, out_root: Path) -> dict:
+        return {
+            "url": "https://good.example/",
+            "title": "",
+            "manifest_path": str(out_root / "fake.png.tiles" / "tiles.json"),
+            "tiles": [],
+            "tile_height": 1568,
+            "viewport": {"width": 1280},
+            "scope": "page",
+            "complete": True,
+            "captured_height": 1,
+            "page_height": 1,
+            "warnings": [],
+        }
+
+    def test_partial_batch_fails_by_default_and_passes_with_allow_partial(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out_root = Path(tmp)
+            with mock.patch.object(capture, "render_with_playwright",
+                                   return_value=self._fake_success(out_root)):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    default_code = capture.main(
+                        ["no_such_page.html", "https://good.example/", "-o", tmp]
+                    )
+                    partial_code = capture.main(
+                        ["no_such_page.html", "https://good.example/", "-o", tmp, "--allow-partial"]
+                    )
+            self.assertEqual(default_code, 1)
+            self.assertEqual(partial_code, 0)
+
+
+class LoginWaitTests(unittest.TestCase):
+    class _Page:
+        def __init__(self, answers):
+            self.answers = list(answers)
+            self.polls = 0
+
+        def evaluate(self, _script):
+            self.polls += 1
+            return self.answers.pop(0) if self.answers else {"ready": True, "asking": True}
+
+        def wait_for_timeout(self, _ms):
+            pass
+
+    def test_returns_true_once_the_password_field_is_gone(self):
+        page = self._Page([
+            {"ready": True, "asking": True},
+            {"ready": True, "asking": True},
+            {"ready": True, "asking": False},
+        ])
+        warnings: list[str] = []
+        self.assertTrue(capture._wait_for_login(page, 30, warnings))
+        self.assertEqual(page.polls, 3)
+        self.assertIn("signed-in", warnings[0])
+
+    def test_a_page_that_has_not_loaded_is_not_called_signed_in(self):
+        page = self._Page([
+            {"ready": False, "asking": False},
+            {"ready": True, "asking": False},
+        ])
+        warnings: list[str] = []
+        self.assertTrue(capture._wait_for_login(page, 30, warnings))
+        self.assertEqual(page.polls, 2)
+
+    def test_gives_up_and_says_so(self):
+        warnings: list[str] = []
+        self.assertFalse(capture._wait_for_login(self._Page([]), 0, warnings))
+        self.assertIn("no login detected", warnings[0])
 
 
 class VerifyTilesTests(unittest.TestCase):
@@ -331,6 +586,36 @@ class VerifyTilesTests(unittest.TestCase):
             warnings: list[str] = []
             capture._verify_tiles(Path(tmp), ["tile_0000.jpg"], warnings)
             self.assertEqual(warnings, [])
+
+    def test_rejects_path_traversal_and_absolute_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for names in (["../secret.jpg"], [str(Path(tmp) / "x.jpg")], ["sub/tile.jpg"]):
+                with self.subTest(names=names):
+                    with self.assertRaises(RuntimeError):
+                        capture._verify_tiles(Path(tmp), names, [], strict=True)
+
+    def test_strict_mode_rejects_missing_tiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError):
+                capture._verify_tiles(Path(tmp), ["tile_0000.jpg"], [], strict=True)
+
+    def test_empty_tile_list_is_not_a_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(RuntimeError):
+                capture._verify_tiles(Path(tmp), [], [], strict=True)
+
+
+class PixelshotTests(unittest.TestCase):
+    def test_match_requires_the_same_url(self):
+        produced = [(Path("a.png.tiles"), {"url": "https://example.com/a"})]
+        self.assertEqual(
+            capture._match_pixelshot_output("https://example.com/a", produced), produced[0]
+        )
+        self.assertIsNone(capture._match_pixelshot_output("https://example.com/b", produced))
+
+    def test_match_never_adopts_the_only_unrelated_manifest(self):
+        produced = [(Path("old.png.tiles"), {"url": "https://example.com/old"})]
+        self.assertIsNone(capture._match_pixelshot_output("https://example.com/new", produced))
 
 
 class BrowserDiscoveryTests(unittest.TestCase):

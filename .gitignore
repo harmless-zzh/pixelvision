@@ -9,6 +9,10 @@ out/
 tiles/
 *.png.tiles/
 
+# browser sessions from --profile (they contain cookies)
+.profiles/
+prof/
+
 # python
 __pycache__/
 *.py[cod]

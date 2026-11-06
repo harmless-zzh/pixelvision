@@ -52,17 +52,30 @@ def check_pillow() -> dict:
 
 
 @lru_cache(maxsize=1)
-def _bundled_chromium() -> str | None:
+def _launch_probe() -> tuple[bool, str]:
+    """Really launch a browser; a discovered path can still fail to start.
+
+    The driver may be installed while the browser binary is unusable (partial
+    `playwright install`, wrong architecture, blocked by policy). Checking only
+    for a file path reports a false ok, so doctor opens about:blank once.
+    """
     try:
         from playwright.sync_api import sync_playwright
 
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from capture import _launch, find_browser  # type: ignore
+
         with sync_playwright() as p:
-            exe = p.chromium.executable_path
-            if exe and Path(exe).is_file():
-                return str(exe)
-    except Exception:  # noqa: BLE001
-        return None
-    return None
+            browser = _launch(p, find_browser())
+            try:
+                page = browser.new_page()
+                page.goto("about:blank", timeout=10000)
+                page.close()
+            finally:
+                browser.close()
+        return True, "launched a browser and opened about:blank"
+    except Exception as exc:  # noqa: BLE001
+        return False, " ".join(str(exc).split())[:300]
 
 
 def check_playwright() -> dict:
@@ -78,23 +91,14 @@ def check_playwright() -> dict:
             f"{sys.executable} -m pip install playwright",
         )
 
-    exe = _bundled_chromium()
-    if exe:
-        return _result("playwright", "ok", f"{dist_version}, bundled chromium present")
-    try:
-        sys.path.insert(0, str(ROOT / "scripts"))
-        from capture import find_browser  # type: ignore
-
-        channel, path = find_browser()
-    except Exception:  # noqa: BLE001
-        channel, path = None, None
-    if path:
-        return _result("playwright", "ok", f"{dist_version}, using system browser ({channel})")
+    launched, detail = _launch_probe()
+    if launched:
+        return _result("playwright", "ok", f"{dist_version}; {detail}")
     return _result(
         "playwright",
         "warn",
-        f"{dist_version}, no browser available yet",
-        "install Chrome/Edge or run `playwright install chromium`",
+        f"{dist_version}, could not launch a browser: {detail}",
+        "install Chrome/Edge, run `playwright install chromium`, or set CHROME_PATH",
     )
 
 
@@ -107,15 +111,14 @@ def check_browser() -> dict:
                        "run this from the repo checkout")
 
     channel, path = find_browser()
-    if path:
-        return _result("browser", "ok", f"{channel}: {path}")
-    bundled = _bundled_chromium()
-    if bundled:
-        return _result("browser", "ok", f"playwright bundled chromium: {bundled}")
+    launched, detail = _launch_probe()
+    if launched:
+        where = f"{channel}: {path}" if path else "playwright bundled chromium"
+        return _result("browser", "ok", f"{where}; {detail}")
     return _result(
         "browser",
         "fail",
-        "no system Chrome/Edge/Chromium and no bundled chromium",
+        f"no browser could be launched ({channel or 'no channel'}: {path or 'no path'}): {detail}",
         "install Chrome or Edge, run `playwright install chromium`, or set CHROME_PATH",
     )
 
@@ -159,7 +162,11 @@ def check_network() -> dict:
 
 def check_skill_install() -> dict:
     home = Path.home()
-    candidates = [home / ".agents" / "skills" / "pixelvision", home / ".dsh" / "skills" / "pixelvision"]
+    candidates = [
+        home / ".agents" / "skills" / "pixelvision",
+        home / ".dsh" / "skills" / "pixelvision",
+        home / ".claude" / "skills" / "pixelvision",
+    ]
     found = [str(p) for p in candidates if (p / "SKILL.md").is_file()]
     if found:
         return _result("skill installed", "ok", ", ".join(found))
