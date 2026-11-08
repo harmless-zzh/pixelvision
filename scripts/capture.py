@@ -56,6 +56,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -274,10 +275,16 @@ def _host_is_local(host: str) -> bool:
         return False
     if name in _LOCAL_NAMES or name.endswith(_LOCAL_SUFFIXES):
         return True
+    candidate = name.split("%", 1)[0]
     try:
-        ip = ipaddress.ip_address(name.split("%", 1)[0])
+        ip = ipaddress.ip_address(candidate)
     except ValueError:
-        return False
+        # Browsers still accept legacy IPv4 spellings such as 127.1 or 2130706433;
+        # inet_aton parses those without doing a DNS lookup.
+        try:
+            ip = ipaddress.ip_address(socket.inet_aton(candidate))
+        except OSError:
+            return False
     return any(
         (
             ip.is_private,
@@ -1410,9 +1417,14 @@ def render_with_pixelshot(
     allow_file: bool = False,
 ) -> dict:
     # pixelshot is a separate process we cannot inspect, so the only place to refuse a
-    # local target is here, before handing it over.
+    # local target is here, before handing it over. Normalize first: a bare
+    # "localhost:5173" or a local file path has no URL scheme for guard_target to see.
     for url in urls:
-        guard_target(url, allow_private=allow_private, allow_file=allow_file)
+        try:
+            guarded = normalize_target(url)
+        except FileNotFoundError:
+            guarded = url
+        guard_target(guarded, allow_private=allow_private, allow_file=allow_file)
     exe = find_pixelshot(pixelshot_bin)
     if not exe:
         raise SystemExit(

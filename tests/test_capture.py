@@ -408,6 +408,9 @@ class TargetGuardTests(unittest.TestCase):
             "http://192.168.1.10/admin",
             "http://10.0.0.5/",
             "http://169.254.169.254/latest/meta-data/",
+            "http://127.1/",
+            "http://2130706433/",
+            "http://0x7f.0.0.1/",
             "http://nas.local/",
             "http://printer.internal/",
         ):
@@ -433,6 +436,17 @@ class TargetGuardTests(unittest.TestCase):
                 code = capture.main([str(page), "-o", tmp])
             self.assertEqual(code, 1)
             render.assert_not_called()
+
+    def test_pixelshot_guard_normalizes_bare_targets(self):
+        # A bare host or path has no scheme for guard_target to inspect.
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<h1>hi</h1>", encoding="utf-8")
+            out = Path(tmp) / "shots"
+            with self.assertRaises(ValueError):
+                capture.render_with_pixelshot(["localhost:5173"], out)
+            with self.assertRaises(ValueError):
+                capture.render_with_pixelshot([str(page)], out)
 
 
 class ParserTests(unittest.TestCase):

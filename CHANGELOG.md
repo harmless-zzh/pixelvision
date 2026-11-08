@@ -24,6 +24,8 @@ All notable changes to PixelVision are documented here.
   for arguments containing `%`, which `cmd.exe` expands.
 - README's Known limitations split into Capture scope, Backend differences, Security
   boundaries, and Development notes, so a scope limit is not mistaken for a security claim.
+- `tile_offsets` / `tile_heights` are documented as `page.png` pixels; at `--scale 2`, divide
+  by `scale` before comparing with `page_height`/`captured_height`.
 
 ### Security
 
@@ -31,6 +33,9 @@ All notable changes to PixelVision are documented here.
   starts. The guard is applied again to the post-redirect URL to close the 302 bypass.
   Name resolution is deliberately not consulted (a hosts-file entry must not decide
   policy); DNS rebinding is documented as out of scope.
+- The `pixelshot` backend normalizes bare hosts/paths before the guard, so `localhost:5173`
+  and local file paths cannot bypass the pre-flight check. Legacy IPv4 spellings such as
+  `127.1`, `2130706433`, and `0x7f.0.0.1` are recognized as loopback too.
 - The guard is a trust boundary, not a sandbox: an allowed page can still reach whatever the
   browser can reach.
 

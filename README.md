@@ -121,12 +121,13 @@ shots/
 
 - `schema_version` — manifests are additive; a new field can appear at any time, but a
   breaking rename bumps this number. Readers that only use `tiles` keep working.
-- `tile_offsets` / `tile_heights` — where each tile starts in page pixels and how tall it
-  is. Tiles are **not** always 1568px: the cutter moves boundaries to a visually quiet row
-  and rebalances a short tail, so map a crop coordinate with
+- `tile_offsets` / `tile_heights` — where each tile starts in **`page.png` pixels** and how
+  tall it is. Tiles are **not** always 1568px: the cutter moves boundaries to a visually
+  quiet row and rebalances a short tail, so map a crop coordinate with
   `page_y = tile_offsets[i] + y_within_tile[i]` instead of assuming a fixed stride.
-  `tile_offsets[i] + tile_heights[i]` equals the next offset; the last pair ends at
-  `captured_height`.
+  `tile_offsets[i] + tile_heights[i]` equals the next offset; the last pair ends at the
+  `page.png` height. With `--scale 2`, `page.png` is twice the CSS page, so divide by
+  `scale` before comparing with `page_height`/`captured_height`.
 - `complete: true` appears only when `scope == "page"`, `captured_height >= page_height - 1` (1px rounding tolerance), `width_truncated` is false, `wrap_suspected` is false, and `lazy_truncated` is false. It is computed, never guessed.
 - If the page content is wider than 1568px, `page.png` is scaled down to 1568px with a warning (text becomes smaller; `crop.py` coordinates refer to the scaled image). If the page is wider than 4096px, only the left side is captured: `width_truncated: true`, `complete: false`.
 - `wrap_suspected: true` means the bottom pixel band of the screenshot is identical to the top band, suggesting Chromium's 16384px wrap; `complete` is then false.

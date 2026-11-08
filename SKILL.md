@@ -126,10 +126,11 @@ Read `tiles.json` first — never `ls`, never assume one tile:
 
 - Read **all** tiles, in order, before summarising. A 30 000 px page is ~19 tiles; reading
   only the first is reading 5% of the article and answering from the header.
-- `tile_offsets[i]` / `tile_heights[i]` say where tile `i` starts and how tall it is in page
-  pixels. Heights vary (the cutter moves a boundary to a blank row and rebalances a short
-  tail), so when mapping a crop coordinate back to the page use
-  `page_y = tile_offsets[i] + y_in_tile` — do not multiply by `tile_height`.
+- `tile_offsets[i]` / `tile_heights[i]` say where tile `i` starts and how tall it is in
+  **`page.png` pixels**. Heights vary (the cutter moves a boundary to a blank row and
+  rebalances a short tail), so when mapping a crop coordinate back to the page use
+  `page_y = tile_offsets[i] + y_in_tile` — do not multiply by `tile_height`. At
+  `--scale 2`, divide by `scale` to compare with `page_height`/`captured_height`.
 - `complete: true` means `scope` is the whole page and every pixel of `page_height` was
   captured. It is never inferred from a successful browser launch. A capture with
   `width_truncated: true` is incomplete even if its height is complete: the page was
