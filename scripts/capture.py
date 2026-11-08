@@ -51,6 +51,7 @@ __version__ = "0.0.1"
 import argparse
 import datetime as _dt
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -73,6 +74,7 @@ DEFAULT_QUALITY = 85
 DEFAULT_SELECTOR_TIMEOUT_MS = 15000
 MIN_SLIVER = 24              # shorter tail bands are rebalanced, never emitted alone
 MANIFEST_NAME = "tiles.json"
+MANIFEST_SCHEMA_VERSION = 1  # bump only for a breaking manifest change
 MAX_CAPTURE_WIDTH = 4096     # safety bound for horizontal page overflow
 SCROLL_LIMIT = 40000         # lazy-load pre-scroll stops here (performance guard)
 MAX_TITLE_CHARS = 300
@@ -253,6 +255,65 @@ _LOOPBACK = re.compile(r"^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|::1)(?::\d+)?
 def _error_result(url: str, error: str) -> dict:
     """Same shape as a successful manifest, so a caller can iterate without special cases."""
     return {"url": redact_url(url), "error": _clean_text(error, limit=1000), "complete": False}
+
+
+_LOCAL_NAMES = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+_LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+
+
+def _host_is_local(host: str) -> bool:
+    """True for loopback, private, link-local, reserved, and local-only names.
+
+    Literal addresses and well-known local names are checked here. A public hostname
+    that resolves to a private address is *not* caught by this function (no DNS
+    lookup): the post-navigation check still sees the final URL, so a 302 to an IP
+    address is blocked, but DNS rebinding is out of scope.
+    """
+    name = (host or "").strip().strip("[]").lower().rstrip(".")
+    if not name:
+        return False
+    if name in _LOCAL_NAMES or name.endswith(_LOCAL_SUFFIXES):
+        return True
+    try:
+        ip = ipaddress.ip_address(name.split("%", 1)[0])
+    except ValueError:
+        return False
+    return any(
+        (
+            ip.is_private,
+            ip.is_loopback,
+            ip.is_link_local,
+            ip.is_reserved,
+            ip.is_multicast,
+            ip.is_unspecified,
+        )
+    )
+
+
+def guard_target(url: str, *, allow_private: bool = False, allow_file: bool = False) -> None:
+    """Refuse targets that reach the local machine unless the caller opted in.
+
+    This is a trust boundary for an agent-driven tool: the caller is often handed a URL
+    it cannot vouch for, and rendering `file://` or an intranet address can expose local
+    files, admin panels, or cloud metadata to whatever the page renders.
+    """
+    parts = urlsplit(url)
+    scheme = (parts.scheme or "").lower()
+    if scheme == "file":
+        if not allow_file:
+            raise ValueError(
+                f"refusing to render {redact_url(url)}: file:// targets are off by default "
+                "(pass --allow-file to render a local file)"
+            )
+        return
+    if scheme in ("http", "https") and not allow_private:
+        host = parts.hostname or ""
+        if _host_is_local(host):
+            shown = host if host else url
+            raise ValueError(
+                f"refusing to render {redact_url(url)}: {shown} is a loopback or private "
+                "address (pass --allow-private to capture a local server)"
+            )
 
 
 def normalize_target(raw: str) -> str:
@@ -464,6 +525,27 @@ def tile_image(
 # manifest
 # --------------------------------------------------------------------------- #
 
+def _tile_geometry(tile_dir: Path, tiles: list[str]) -> tuple[list[int], list[int]]:
+    """Return each tile's y offset and height in page pixels.
+
+    Tiles are cut by a quiet-row heuristic and a tail rebalance, so heights are not
+    guaranteed to be uniform; readers that need to map a crop coordinate back to the
+    page must use these offsets instead of assuming a fixed tile_height stride.
+    """
+    offsets: list[int] = []
+    heights: list[int] = []
+    top = 0
+    for name in tiles:
+        try:
+            height = _image_height(tile_dir / name)
+        except Exception:  # noqa: BLE001 - a missing tile is reported by _verify_tiles
+            return [], []
+        offsets.append(top)
+        heights.append(height)
+        top += height
+    return offsets, heights
+
+
 def build_manifest(
     *,
     url: str,
@@ -483,6 +565,9 @@ def build_manifest(
     width_truncated: bool = False,
     wrap_suspected: bool = False,
     lazy_truncated: bool = False,
+    tile_offsets: list[int] | None = None,
+    tile_heights: list[int] | None = None,
+    viewport_reported: bool = True,
 ) -> dict:
     """Assemble the manifest and derive `complete` from what was captured."""
     warnings = [_clean_text(w, limit=500) for w in warnings]
@@ -516,6 +601,7 @@ def build_manifest(
         and not lazy_truncated
     )
     return {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
         "url": redact_url(url),
         "final_url": redact_url(final_url),
         "title": _clean_text(title),
@@ -523,7 +609,10 @@ def build_manifest(
         "page_height": page_height,
         "captured_height": captured_height,
         "viewport": viewport,
+        "viewport_reported": viewport_reported,
         "tile_height": tile_height,
+        "tile_offsets": tile_offsets or [],
+        "tile_heights": tile_heights or [],
         "scale": scale,
         "selector": _clean_text(selector, limit=200) if selector else None,
         "tiles": tiles,
@@ -872,7 +961,10 @@ def render_with_playwright(
     profile: Path | None = None,
     headful: bool = False,
     wait_login: int = 0,
+    allow_private: bool = False,
+    allow_file: bool = False,
 ) -> dict:
+    guard_target(url, allow_private=allow_private, allow_file=allow_file)
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -955,6 +1047,20 @@ def render_with_playwright(
                 if response is not None:
                     ctype = (response.headers or {}).get("content-type", "")
                     served_pdf = "application/pdf" in ctype.lower()
+                # A 302 to 127.0.0.1 or to an intranet host would slip past the pre-flight
+                # check; re-check what the browser actually landed on.
+                landed = page.url or url
+                if landed != url:
+                    try:
+                        guard_target(
+                            landed, allow_private=allow_private, allow_file=allow_file
+                        )
+                    except ValueError as exc:
+                        raise RuntimeError(
+                            f"navigation redirected to a blocked target: {exc}"
+                        )
+            except ValueError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(
                     f"navigation failed for {redact_url(url)}: {exc}".replace("\n", " ")[:400]
@@ -1193,6 +1299,10 @@ def render_with_playwright(
     if len(tiles) > 20:
         warnings.append(f"{len(tiles)} tiles captured; read them in batches and crop when text is small")
 
+    tile_offsets, tile_heights = _tile_geometry(tile_dir, tiles)
+    if not tile_offsets:
+        warnings.append("could not measure tile heights; tile_offsets is empty")
+
     manifest = build_manifest(
         url=url,
         final_url=final_url,
@@ -1201,9 +1311,12 @@ def render_with_playwright(
         captured_height=captured_height,
         tile_height=tile_height,
         viewport={"width": viewport_width, "height": viewport_height},
+        viewport_reported=True,
         scale=scale,
         selector=selector,
         tiles=tiles,
+        tile_offsets=tile_offsets,
+        tile_heights=tile_heights,
         scope=scope,
         backend=f"playwright:{hint[0] or 'bundled'}",
         warnings=warnings,
@@ -1293,7 +1406,13 @@ def render_with_pixelshot(
     max_height: int | None = None,
     pixelshot_bin: str | None = None,
     ignored_flags: list[str] | None = None,
+    allow_private: bool = False,
+    allow_file: bool = False,
 ) -> dict:
+    # pixelshot is a separate process we cannot inspect, so the only place to refuse a
+    # local target is here, before handing it over.
+    for url in urls:
+        guard_target(url, allow_private=allow_private, allow_file=allow_file)
     exe = find_pixelshot(pixelshot_bin)
     if not exe:
         raise SystemExit(
@@ -1415,15 +1534,22 @@ def render_with_pixelshot(
                 shutil.copyfile(mpath, original)
             except OSError as exc:  # noqa: BLE001
                 warnings.append(f"could not keep a copy of pixelshot's manifest: {exc}")
+            tile_offsets, tile_heights = _tile_geometry(tile_dir, tiles)
             manifest = {
+                "schema_version": MANIFEST_SCHEMA_VERSION,
                 "url": redact_url(str(raw.get("url", url))),
                 "final_url": redact_url(str(raw.get("url", url))),
                 "title": _clean_text(raw.get("title", "")),
                 "scope": "page",
                 "page_height": page_height,
                 "captured_height": captured_height,
-                "viewport": {"width": viewport_width, "height": tile_height},
+                # pixelshot does not record the viewport it used, and filling in our own
+                # numbers would make the field look measured when it is guessed.
+                "viewport": {"width": viewport_width, "height": None},
+                "viewport_reported": False,
                 "tile_height": tile_height,
+                "tile_offsets": tile_offsets,
+                "tile_heights": tile_heights,
                 "scale": 1,
                 "selector": None,
                 "tiles": tiles,
@@ -1516,6 +1642,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="open a visible browser (requires --profile); use it to log in")
     p.add_argument("--wait-login", type=_bounded_int("--wait-login", 0, 1800), default=0,
                    help="with --show: poll this many seconds for a human to finish logging in")
+    p.add_argument("--allow-private", action="store_true",
+                   help="allow loopback/private addresses (localhost, 127.0.0.1, 10.x, "
+                        "192.168.x, .local); refused by default")
+    p.add_argument("--allow-file", action="store_true",
+                   help="allow file:// targets (local HTML/images); refused by default")
     p.add_argument("--wait-ms", type=_bounded_int("--wait-ms", 0, 120000),
                    default=0, help="extra settle time before capture")
     p.add_argument("--no-network-idle", action="store_true", help="skip the network-quiet wait")
@@ -1617,6 +1748,8 @@ def main(argv: list[str] | None = None) -> int:
                     max_height=args.max_height,
                     pixelshot_bin=args.pixelshot,
                     ignored_flags=ignored_flags,
+                    allow_private=args.allow_private,
+                    allow_file=args.allow_file,
                 )
             except Exception as exc:  # noqa: BLE001
                 # A renderer crash should still produce one error result per target, so
@@ -1629,7 +1762,14 @@ def main(argv: list[str] | None = None) -> int:
             for raw in args.urls:
                 try:
                     target = normalize_target(raw)
-                except FileNotFoundError as exc:
+                    # Refuse local targets before any browser work (and before the
+                    # "rendering a local file" note, which would be a lie otherwise).
+                    guard_target(
+                        target,
+                        allow_private=args.allow_private,
+                        allow_file=args.allow_file,
+                    )
+                except (FileNotFoundError, ValueError) as exc:
                     results.append(_error_result(raw, str(exc)))
                     continue
                 if target.startswith("file://"):
@@ -1659,6 +1799,8 @@ def main(argv: list[str] | None = None) -> int:
                             profile=profile,
                             headful=args.show,
                             wait_login=args.wait_login,
+                            allow_private=args.allow_private,
+                            allow_file=args.allow_file,
                         )
                     )
                 except Exception as exc:  # noqa: BLE001

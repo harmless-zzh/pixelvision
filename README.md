@@ -28,7 +28,7 @@ The point: **vision reads layout and facts; text reads programmable data.** Swit
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1   # create venv, install playwright+pillow, check for a browser
-.\pixelvision.cmd https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API -o .\shots
+.\pixelvision.ps1 https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API -o .\shots
 ```
 
 Output:
@@ -43,7 +43,7 @@ https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API
 
 Then have the model read `tiles.json`, followed by `tile_0000.jpg` … `tile_0003.jpg` in order. On macOS / Linux use `scripts/bootstrap.sh` and `./pixelvision`.
 
-If an argument contains `%` (percent-encoded URLs, passwords), use `.\pixelvision.ps1` rather than `.cmd`: cmd.exe expands `%VAR%` before forwarding, while the PowerShell launcher passes arguments through unchanged. If the execution policy blocks `.ps1` files, run `powershell -ExecutionPolicy Bypass -File .\pixelvision.ps1 ...`, or bypass both shells entirely with `.\.venv\Scripts\python.exe pixelvision.py ...`.
+The launchers differ in one way that matters: `.ps1` and `pixelvision.py` pass arguments through unchanged, while `pixelvision.cmd` goes through cmd.exe, which expands `%VAR%` inside arguments first. **Use `.\pixelvision.ps1` (or `.\.venv\Scripts\python.exe pixelvision.py`) when a URL contains `%`** — percent-encoded paths, query strings, passwords. `.cmd` stays as a convenience alias for plain arguments. If the execution policy blocks `.ps1` files, run `powershell -ExecutionPolicy Bypass -File .\pixelvision.ps1 ...`.
 
 ### Common flags
 
@@ -61,6 +61,8 @@ python scripts/capture.py URL -o shots --selector-timeout 5000           # eleme
 python scripts/capture.py URL1 URL2 -o shots --allow-partial             # exit 0 if at least one target succeeds
 python scripts/capture.py URL -o shots --wait-ms 3000                   # wait for slow animations / late charts
 python scripts/capture.py URL1 URL2 -o shots --backend pixelshot        # use PixelRAG's renderer
+python scripts/capture.py examples/demo.html -o shots --allow-file      # local files are opt-in
+python scripts/capture.py http://localhost:5173 -o shots --allow-private # local servers are opt-in
 python scripts/capture.py URL -o shots --json                           # machine-readable output
 ```
 
@@ -103,10 +105,12 @@ shots/
 
 ```json
 {
+  "schema_version": 1,
   "url": "https://...", "final_url": "https://...", "title": "Fetch API - Web APIs | MDN",
   "scope": "page", "page_height": 5310, "captured_height": 5310,
-  "viewport": {"width": 1280, "height": 900},
-  "tile_height": 1568, "scale": 1, "selector": null,
+  "viewport": {"width": 1280, "height": 900}, "viewport_reported": true,
+  "tile_height": 1568, "tile_offsets": [0, 1568, 3136, 4704],
+  "tile_heights": [1568, 1568, 1568, 606], "scale": 1, "selector": null,
   "tiles": ["tile_0000.jpg", "..."],
   "complete": true, "width_truncated": false, "wrap_suspected": false,
   "lazy_truncated": false, "backend": "playwright:msedge",
@@ -115,6 +119,14 @@ shots/
 }
 ```
 
+- `schema_version` — manifests are additive; a new field can appear at any time, but a
+  breaking rename bumps this number. Readers that only use `tiles` keep working.
+- `tile_offsets` / `tile_heights` — where each tile starts in page pixels and how tall it
+  is. Tiles are **not** always 1568px: the cutter moves boundaries to a visually quiet row
+  and rebalances a short tail, so map a crop coordinate with
+  `page_y = tile_offsets[i] + y_within_tile[i]` instead of assuming a fixed stride.
+  `tile_offsets[i] + tile_heights[i]` equals the next offset; the last pair ends at
+  `captured_height`.
 - `complete: true` appears only when `scope == "page"`, `captured_height >= page_height - 1` (1px rounding tolerance), `width_truncated` is false, `wrap_suspected` is false, and `lazy_truncated` is false. It is computed, never guessed.
 - If the page content is wider than 1568px, `page.png` is scaled down to 1568px with a warning (text becomes smaller; `crop.py` coordinates refer to the scaled image). If the page is wider than 4096px, only the left side is captured: `width_truncated: true`, `complete: false`.
 - `wrap_suspected: true` means the bottom pixel band of the screenshot is identical to the top band, suggesting Chromium's 16384px wrap; `complete` is then false.
@@ -124,6 +136,7 @@ shots/
   - `selector` / `viewport` — intentionally partial; never describe it as the whole page;
   - `pdf-viewer` — only the page currently visible in the PDF viewer.
 - No `tiles.json` — rendering failed; this is not an empty page.
+- `viewport_reported: false` — the backend did not report the viewport it used; `viewport.height` is then `null` rather than estimated. `--backend pixelshot` always sets this.
 - `warnings` — network-idle timeouts, height caps, and similar conditions; relay them as they are.
 
 ## Install into your agent
@@ -139,7 +152,8 @@ The skill itself lives in [`SKILL.md`](SKILL.md): the complete workflow, failure
 ## Backends
 
 - `playwright` (default, self-contained): drives the local Chrome / Edge / Chromium and handles lazy-load scrolling, network-idle waits, and page-height races.
-- `pixelshot` (optional): calls PixelRAG's CLI. Install it with `uv tool install pixelrag` (or `pipx` / `pip install pixelrag`), then pass `--backend pixelshot`; on Windows without Chrome, set `CHROME_PATH` to Edge. This backend never rewrites pixelshot's own manifest: the original is preserved as `pixelshot.tiles.json`, while the `tiles.json` we write is the contract downstream reads (`complete` is derived from the height actually covered by tiles, not copied; stale manifests are not reused). It always captures the whole page and does **not** forward `--selector`, `--max-height`, `--no-full-page`, `--viewport-height`, `--scale`, `--wait-ms`, `--no-network-idle`, `--selector-timeout`, `--wait-login`, or `--storage-state`; passing any of them produces a warning.
+- `pixelshot` (optional): calls PixelRAG's CLI. Install it with `uv tool install pixelrag` (or `pipx` / `pip install pixelrag`), then pass `--backend pixelshot`; on Windows without Chrome, set `CHROME_PATH` to Edge. This backend never rewrites pixelshot's own manifest: the original is copied to `pixelshot.tiles.json` (if that copy fails, the manifest records a warning instead of claiming it succeeded), and the `tiles.json` we write is the contract downstream reads (`complete` is derived from the height actually covered by tiles, not copied; stale manifests are not reused). It always captures the whole page and does **not** forward `--selector`, `--max-height`, `--no-full-page`, `--viewport-height`, `--scale`, `--wait-ms`, `--no-network-idle`, `--selector-timeout`, `--wait-login`, or `--storage-state`; passing any of them produces a warning.
+  Its metadata is also thinner than the Playwright backend's, and the manifest says so rather than filling the gaps: the **viewport is not reported** (`viewport.height: null`, `viewport_reported: false`) because pixelshot does not record it, `title` may be empty because it is read from pixelshot's manifest, `scale` is fixed at 1, and the directory name is pixelshot's encoded path rather than a readable slug. Tile geometry (`tile_offsets` / `tile_heights`) is still measured from the files on disk.
 
 ## Security: screenshots are untrusted data
 
@@ -149,7 +163,23 @@ The same rule applies to every page-derived field in the manifest: `title`, `war
 
 The scripts in this skill accept explicit arguments only and never `eval` page content; `crop.py` coordinates always arrive via argv and are never interpolated into a shell string. `capture.py` hides username/password userinfo in URLs (replacing it with `***@host` before writing manifests or error messages); use `--storage-state` for sessions instead of putting passwords in URLs.
 
-**Trust boundary:** `capture.py` renders any `http(s)` / `file://` target you give it, including `localhost`, intranet addresses, and local files; it does not block private IPs. Do not point it at an untrusted source unless you accept that the page content enters the model and that locally reachable resources may be captured.
+**Trust boundary:** `capture.py` is a renderer, not a sandbox. By default it refuses targets
+that reach the local machine — `file://`, loopback (`localhost`, `127.0.0.1`, `[::1]`),
+private and link-local ranges (`10/8`, `172.16/12`, `192.168/16`, `169.254/16`), and local-only
+names (`*.local`, `*.internal`, `*.localhost`) — because an agent is often handed a URL it
+cannot vouch for, and rendering one can expose local files, admin panels, or cloud metadata
+to whatever the page contains. Two explicit flags lift the guard for a target you chose:
+
+```bash
+python scripts/capture.py http://localhost:5173 -o shots --allow-private   # a dev server you run
+python scripts/capture.py examples/demo.html -o shots --allow-file        # a local HTML file
+```
+
+The check runs again after navigation, so a `302` to a blocked address fails the capture
+instead of rendering it. It is address-based and does not resolve DNS: a public hostname
+that resolves to a private IP is not caught (DNS rebinding), and the page you do render can
+still `fetch()` anything its own client-side code reaches. Treat every page as untrusted
+input regardless.
 
 ## Dependencies and layout
 
@@ -168,13 +198,23 @@ Only `playwright` and `pillow` are required; Python ≥ 3.10. PixelVision prefer
 
 ## Known limitations (accepted)
 
+### Capture scope
+
 - **No multi-page PDF support:** only the PDF page currently visible in the browser viewer is captured, toolbar and possibly the top of the next page included. Convert multi-page PDFs to images first. True pagination would need an extra PDF rendering dependency.
+- **Tile seams are heuristic:** the cutter looks up to 64px above each boundary for a near-blank row and rebalances a short tail; it does not overlap and de-duplicate, so extreme pages can still cut through text. `tile_offsets` tells you exactly where each cut landed.
+
+### Backend differences
+
+- **pixelshot metadata is thinner than Playwright's:** no viewport is reported (`viewport.height: null`, `viewport_reported: false`), the title may be empty, and the slug is pixelshot's encoded path. Its own manifest is always copied to `pixelshot.tiles.json`; a failed copy is recorded in `warnings` rather than hidden. Tile geometry is measured from the produced files either way.
+
+### Security boundaries
+
+- **Local and private targets are refused by default:** `--allow-private` and `--allow-file` opt in per run. The guard is address-based and re-checked after redirects; it does not resolve DNS (a public hostname pointing at a private IP is not caught), and it does not confine what JavaScript inside a rendered page can reach.
+
+### Development notes
+
 - **Browser regression is opt-in:** the default unit suite stays browser-free; set `PIXELVISION_BROWSER_TESTS=1` to run the 20000px wrap regression.
-- **pixelshot metadata is imperfect:** local files may have an empty title, the slug is an encoded path, and the viewport height is approximate; pixelshot's original manifest is preserved as `pixelshot.tiles.json`.
-- **No technical block on local/private targets:** `localhost`, intranet addresses, and `file://` are all renderable; this is only documented as a trust boundary.
-- **Tile seams are heuristic:** the cutter looks up to 64px above each boundary for a near-blank row; it does not overlap and de-duplicate, so extreme pages can still cut through text.
-- **`.cmd` still expands `%VAR%`:** use `pixelvision.ps1` or `pixelvision.py` for arguments containing `%`.
-- **No `schema_version` or per-tile y offsets in the manifest:** downstream code reads tiles in order and must not assume a fixed 1568px offset.
+- **Launchers are not interchangeable:** `.ps1` and `pixelvision.py` pass arguments through unchanged; `pixelvision.cmd` goes through cmd.exe, which expands `%VAR%` inside arguments. Use the `.ps1` launcher for URLs containing `%`.
 
 ## Credits and license
 

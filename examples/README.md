@@ -8,9 +8,12 @@ painted onto a canvas. A text extractor sees an empty `<canvas>` element and a t
 A reader sees the trend and the orange failover week.
 
 ```bash
-python scripts/capture.py examples/demo.html -o ./shots --viewport-width 1100
+python scripts/capture.py examples/demo.html -o ./shots --viewport-width 1100 --allow-file
 # then read shots/demo.html.png.tiles/tiles.json and tile_0000.jpg
 ```
+
+Local files need `--allow-file`: `file://` targets are refused by default (see the trust
+boundary section of the main README).
 
 The image at `docs/demo.png` in the repository root is this page captured and cropped.
 

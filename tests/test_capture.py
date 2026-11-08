@@ -329,6 +329,34 @@ class ManifestTests(unittest.TestCase):
     def test_one_pixel_rounding_is_still_complete(self):
         self.assertTrue(self._manifest(captured_height=999)["complete"])
 
+    def test_schema_version_is_stamped(self):
+        manifest = self._manifest()
+        self.assertEqual(manifest["schema_version"], 1)
+
+    def test_tile_geometry_is_passed_through(self):
+        manifest = self._manifest(
+            tiles=["tile_0000.jpg", "tile_0001.jpg", "tile_0002.jpg"],
+            tile_offsets=[0, 1568, 3136],
+            tile_heights=[1568, 1568, 812],
+        )
+        self.assertEqual(manifest["tile_offsets"], [0, 1568, 3136])
+        self.assertEqual(manifest["tile_heights"], [1568, 1568, 812])
+        self.assertEqual(manifest["tiles"][2], "tile_0002.jpg")
+
+    def test_missing_geometry_is_an_empty_list_not_missing_keys(self):
+        manifest = self._manifest()
+        self.assertEqual(manifest["tile_offsets"], [])
+        self.assertEqual(manifest["tile_heights"], [])
+
+    def test_unreported_viewport_stays_null(self):
+        # pixelshot does not record its viewport: saying "1568" would look measured.
+        manifest = self._manifest(
+            viewport={"width": 1280, "height": None}, viewport_reported=False
+        )
+        self.assertIsNone(manifest["viewport"]["height"])
+        self.assertFalse(manifest["viewport_reported"])
+        self.assertTrue(self._manifest()["viewport_reported"])
+
     def test_manifest_is_written_atomically(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = capture.write_manifest(Path(tmp), self._manifest())
@@ -337,6 +365,74 @@ class ManifestTests(unittest.TestCase):
             data = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(data["scope"], "page")
             self.assertTrue(data["complete"])
+            self.assertEqual(data["schema_version"], 1)
+
+
+class TileGeometryTests(unittest.TestCase):
+    def test_offsets_are_cumulative_and_cover_the_image(self):
+        tmp = Path(tempfile.mkdtemp())
+        page = tmp / "page.png"
+        Image.new("RGB", (1280, 5000), "white").save(page)
+        out = tmp / "tiles"
+        names = capture.tile_image(page, out, tile_height=1568)
+        offsets, heights = capture._tile_geometry(out, names)
+        self.assertEqual(len(offsets), len(names))
+        self.assertEqual(len(heights), len(names))
+        self.assertEqual(offsets[0], 0)
+        for index in range(1, len(offsets)):
+            self.assertEqual(offsets[index], offsets[index - 1] + heights[index - 1])
+        self.assertEqual(offsets[-1] + heights[-1], 5000)
+
+    def test_unequal_heights_are_reported_honestly(self):
+        # The sliver rebalance makes the last two bands equal but shorter than 1568.
+        tmp = Path(tempfile.mkdtemp())
+        page = tmp / "page.png"
+        Image.new("RGB", (800, 3 * 1568 + 10), "white").save(page)
+        out = tmp / "tiles"
+        names = capture.tile_image(page, out, tile_height=1568)
+        _, heights = capture._tile_geometry(out, names)
+        self.assertEqual(heights[-2:], [789, 789])
+        self.assertNotEqual(heights[-1], 1568)
+
+    def test_missing_tile_returns_no_geometry(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.assertEqual(capture._tile_geometry(tmp, ["tile_0000.jpg"]), ([], []))
+
+
+class TargetGuardTests(unittest.TestCase):
+    def test_loopback_and_private_are_refused_by_default(self):
+        for url in (
+            "http://localhost:5173/",
+            "http://127.0.0.1/",
+            "http://[::1]:8000/",
+            "http://192.168.1.10/admin",
+            "http://10.0.0.5/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://nas.local/",
+            "http://printer.internal/",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(ValueError):
+                    capture.guard_target(url)
+
+    def test_public_targets_and_flag_are_allowed(self):
+        capture.guard_target("https://example.com/docs")
+        capture.guard_target("http://93.184.216.34/")
+        capture.guard_target("http://localhost:5173/", allow_private=True)
+
+    def test_file_targets_are_refused_by_default(self):
+        with self.assertRaises(ValueError):
+            capture.guard_target("file:///C:/tmp/page.html")
+        capture.guard_target("file:///C:/tmp/page.html", allow_file=True)
+
+    def test_guard_runs_before_a_browser_launches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<h1>hi</h1>", encoding="utf-8")
+            with mock.patch.object(capture, "render_with_playwright") as render:
+                code = capture.main([str(page), "-o", tmp])
+            self.assertEqual(code, 1)
+            render.assert_not_called()
 
 
 class ParserTests(unittest.TestCase):
@@ -458,6 +554,36 @@ class CliTests(unittest.TestCase):
             message = err.getvalue()
             self.assertIn("no_such_page.html", message)
             self.assertIn("also_missing.html", message)
+
+    def test_local_file_needs_allow_file_and_then_renders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "page.html"
+            page.write_text("<h1>hi</h1>", encoding="utf-8")
+            fake = {
+                "url": page.as_uri(),
+                "complete": True,
+                "manifest_path": str(Path(tmp) / "tiles.json"),
+                "tiles": ["tile_0000.jpg"],
+                "viewport": {"width": 1280, "height": 900},
+                "tile_height": 1568,
+                "page_height": 900,
+                "captured_height": 900,
+                "scope": "page",
+            }
+            with mock.patch.object(capture, "render_with_playwright", return_value=fake) as render:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    code = capture.main([str(page), "-o", tmp, "--allow-file"])
+            self.assertEqual(code, 0)
+            render.assert_called_once()
+            self.assertEqual(render.call_args.kwargs["allow_file"], True)
+
+    def test_private_target_needs_allow_private(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = capture.main(["http://127.0.0.1:8080/", "-o", tmp])
+            self.assertEqual(code, 1)
+            self.assertIn("--allow-private", err.getvalue())
 
     def test_show_without_profile_is_rejected_before_launching(self):
         with tempfile.TemporaryDirectory() as tmp:

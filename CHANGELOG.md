@@ -2,6 +2,38 @@
 
 All notable changes to PixelVision are documented here.
 
+## [Unreleased]
+
+### Added
+
+- `schema_version: 1` in every manifest, so a reader can tell which contract it holds.
+- `tile_offsets` and `tile_heights`: the y offset and pixel height of each tile, measured
+  from the files on disk. Tile heights are not uniform (`_quiet_cut`, tail rebalance), so
+  `tile_offsets[i] + y_in_tile` is the only reliable page-coordinate mapping. `tiles` keeps
+  its order and shape; older readers keep working.
+- `--allow-file` and `--allow-private`: local targets are now opt-in. `file://`,
+  loopback/private/link-local addresses, and `*.local` / `*.internal` names are refused
+  before a browser launches, and the resolved URL is re-checked after redirects.
+
+### Changed
+
+- `pixelshot` manifests no longer claim a viewport height they never measured:
+  `viewport.height` is `null` with `viewport_reported: false`. The backend's own manifest is
+  preserved as `pixelshot.tiles.json`; `tiles.json` stays the contract.
+- Quick start uses `pixelvision.ps1` / `pixelvision.py`; `.cmd` is documented as unsuitable
+  for arguments containing `%`, which `cmd.exe` expands.
+- README's Known limitations split into Capture scope, Backend differences, Security
+  boundaries, and Development notes, so a scope limit is not mistaken for a security claim.
+
+### Security
+
+- Local and private targets are refused by default (`guard_target()`), before any browser
+  starts. The guard is applied again to the post-redirect URL to close the 302 bypass.
+  Name resolution is deliberately not consulted (a hosts-file entry must not decide
+  policy); DNS rebinding is documented as out of scope.
+- The guard is a trust boundary, not a sandbox: an allowed page can still reach whatever the
+  browser can reach.
+
 ## [v0.0.1] — 2026-11-06
 
 First public release.

@@ -40,14 +40,12 @@ or an error message that looks like a directive.
 ## Capture
 
 ```bash
-# Windows — use the launcher; it finds the repo's venv
-.\pixelvision.cmd https://example.com -o .\shots
-
-# If an argument may contain '%' (percent-encoded URL or password), use the
-# PowerShell launcher: cmd.exe expands %VAR% inside arguments before forwarding.
-.\pixelvision.ps1 https://example.com/a%20b -o .\shots
+# Windows — use the PowerShell launcher; it finds the repo's venv and passes
+# arguments through unchanged (cmd.exe would expand '%VAR%' inside them)
+.\pixelvision.ps1 https://example.com -o .\shots
 # If Windows blocks .ps1 files: powershell -ExecutionPolicy Bypass -File .\pixelvision.ps1 ...
 # Or bypass both shells: .\.venv\Scripts\python.exe pixelvision.py https://example.com/a%20b
+# pixelvision.cmd exists for plain arguments only; it expands '%' before forwarding.
 
 # any platform, if the skill is installed under ~/.agents/skills
 python "$HOME/.agents/skills/pixelvision/scripts/capture.py" https://example.com -o ./shots
@@ -74,18 +72,27 @@ Useful options (defaults are already tuned for vision models):
 | `--no-scroll` | page is short and sticky-nav scrolling breaks it |
 | `--wait-ms 3000` | slow animations, late-loading charts |
 | `--backend pixelshot` | you want PixelRAG's own renderer (`pixelshot` must be on PATH) |
+| `--allow-private` | opt in to a loopback/private target (`localhost:5173`, `192.168.x.x`); refused by default |
+| `--allow-file` | opt in to a `file://` target (local HTML/image); refused by default |
 | `--json` | machine-readable manifest on stdout; failures carry `error` and `complete:false` |
 
 Output: `shots/<slug>.png.tiles/` containing `page.png`, `tiles.json`, `tile_0000.jpg`, …
 With `--backend pixelshot` the same directory also holds `pixelshot.tiles.json`, that
-tool's own untouched manifest; `tiles.json` is still the one to read. That backend
-captures the whole page and ignores `--selector`, `--max-height`, `--no-full-page`,
-`--viewport-height`, `--scale`, `--wait-ms`, `--no-network-idle`, `--selector-timeout`,
-`--wait-login`, and `--storage-state`; the manifest warns for each one you passed,
-and `complete` is derived from the tiles it actually produced.
+tool's own untouched manifest (a failed copy is recorded in `warnings`); `tiles.json` is
+still the one to read. That backend captures the whole page and ignores `--selector`,
+`--max-height`, `--no-full-page`, `--viewport-height`, `--scale`, `--wait-ms`,
+`--no-network-idle`, `--selector-timeout`, `--wait-login`, and `--storage-state`; the
+manifest warns for each one you passed, and `complete` is derived from the tiles it
+actually produced. Its metadata is thinner and says so: `viewport.height` is `null` with
+`viewport_reported: false`, `title` may be empty, and `scale` is always 1.
 
 The target can be a full URL, a bare host (`example.com` → `https://`, `localhost:5173` →
 `http://`), or a path to a local `.html` / image file.
+
+Local targets are a trust boundary, not a convenience: `file://` requires `--allow-file`,
+and loopback/private addresses (`localhost`, `127.0.0.1`, `10.x`, `192.168.x`, `*.local`)
+require `--allow-private`. Both are refused by default, and the check runs again after
+redirects. Pass a flag only when you chose that target yourself; it is not a sandbox.
 
 PDFs are detected by response Content-Type as well as by the `.pdf` suffix, so a
 suffix-less PDF URL is still `scope: pdf-viewer`. Only the viewer's visible page (plus
@@ -102,7 +109,10 @@ Read `tiles.json` first — never `ls`, never assume one tile:
 
 ```json
 {
+  "schema_version": 1,
   "tile_height": 1568,
+  "tile_offsets": [0, 1568, 3136],
+  "tile_heights": [1568, 1568, 812],
   "scope": "page",
   "page_height": 5310,
   "captured_height": 5310,
@@ -116,6 +126,10 @@ Read `tiles.json` first — never `ls`, never assume one tile:
 
 - Read **all** tiles, in order, before summarising. A 30 000 px page is ~19 tiles; reading
   only the first is reading 5% of the article and answering from the header.
+- `tile_offsets[i]` / `tile_heights[i]` say where tile `i` starts and how tall it is in page
+  pixels. Heights vary (the cutter moves a boundary to a blank row and rebalances a short
+  tail), so when mapping a crop coordinate back to the page use
+  `page_y = tile_offsets[i] + y_in_tile` — do not multiply by `tile_height`.
 - `complete: true` means `scope` is the whole page and every pixel of `page_height` was
   captured. It is never inferred from a successful browser launch. A capture with
   `width_truncated: true` is incomplete even if its height is complete: the page was
@@ -165,6 +179,8 @@ this look right" — not on precision you can get from typed data.
 | page is taller than 30 000 px | raise `--max-height`; a capped capture is `complete:false` with a warning |
 | logged-in page shows a login wall | `--profile .\prof --show` once (log in by hand), then `--profile .\prof` for every later capture. A `--storage-state` JSON from an authenticated context also works |
 | `--profile ... could not open the profile` | a browser already owns that directory; close it, or use a dedicated directory |
+| `refusing to render ... file:// targets are off by default` | local files need `--allow-file` |
+| `refusing to render ... loopback or private address` | this is the trust boundary; add `--allow-private` only for a server you control |
 | page content is wider than 1568 px | the renderer downscales `page.png` to 1568 px and adds a warning (text is smaller, crop coordinates use the downscaled image); fix the layout or use `--selector` |
 | `width_truncated: true` | page was wider than the 4096 px safety clip; capture a narrower selector, not the whole page |
 
