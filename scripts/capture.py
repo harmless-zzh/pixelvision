@@ -46,7 +46,7 @@ Exit codes: 0 ok, 1 render failed, 2 bad usage / missing dependency.
 
 from __future__ import annotations
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 import argparse
 import datetime as _dt

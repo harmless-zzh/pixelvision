@@ -9,7 +9,7 @@ description: |
   can fetch directly.
 ---
 
-# PixelVision v0.0.1 — read pages with eyes, not regexes
+# PixelVision v0.0.2 — read pages with eyes, not regexes
 
 HTML tells you what a page *claims*; a screenshot tells you what a reader *sees*. Use this
 skill whenever the rendered pixels carry the meaning — dashboards, charts, tables, canvas,

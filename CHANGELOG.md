@@ -4,6 +4,8 @@ All notable changes to PixelVision are documented here.
 
 ## [Unreleased]
 
+## [v0.0.2] — 2026-11-08
+
 ### Added
 
 - `schema_version: 1` in every manifest, so a reader can tell which contract it holds.

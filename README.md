@@ -10,7 +10,7 @@ capture.py  →  page.png + tile_0000..N.jpg + tiles.json  →  model reads ever
 
 ![demo](docs/demo.png)
 
-Current version: **v0.0.1**.
+Current version: **v0.0.2**.
 
 ## Why not HTML?
 
